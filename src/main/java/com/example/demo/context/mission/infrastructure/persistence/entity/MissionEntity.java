@@ -4,6 +4,7 @@ import com.example.demo.context.mission.domain.model.Mission;
 import com.example.demo.context.mission.domain.model.MissionType;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.annotation.Version;
+import org.springframework.data.domain.Persistable;
 import org.springframework.data.relational.core.mapping.Table;
 
 import java.time.LocalDateTime;
@@ -19,7 +20,17 @@ public record MissionEntity(
     LocalDateTime completedAt,
     LocalDateTime expiredAt,
     @Version int version
-) {
+) implements Persistable<Long> {
+
+    @Override
+    public Long getId() {
+        return id;
+    }
+
+    @Override
+    public boolean isNew() {
+        return id == null;
+    }
 
     public Mission toDomain() {
         return Mission.reconstitute(id, userId, missionType, progress, target, completed, completedAt, expiredAt, version);

@@ -13,4 +13,11 @@ public enum MissionType {
 
     private final int target;
     private final String description;
+
+    public boolean isTargetReached(int progress, int target) {
+        if (this == PLAY_SCORE) {
+            return progress > target;
+        }
+        return progress >= target;
+    }
 }

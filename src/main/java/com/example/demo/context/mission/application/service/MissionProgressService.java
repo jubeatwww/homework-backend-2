@@ -88,14 +88,14 @@ public class MissionProgressService {
     ) {
         if (isCachedCompleted(userId, type)) {
             log.debug("Mission already completed (cached) for userId={}, type={}, checking reward", userId, type);
+            // Cache hit means completed, so we can skip DB update and directly check reward.
             tryGrantReward(userId);
             return;
         }
 
-        if (!recordAction.getAsBoolean()) {
-            log.debug("Duplicate record for userId={}, type={}, skipping progress update", userId, type);
-            tryGrantReward(userId);
-            return;
+        boolean actionRecorded = recordAction.getAsBoolean();
+        if (!actionRecorded) {
+            log.debug("Duplicate record for userId={}, type={}, recomputing progress for recovery", userId, type);
         }
 
         boolean completed = retryOnOptimisticLock(
@@ -105,12 +105,15 @@ public class MissionProgressService {
 
         if (completed) {
             safeMarkCompleted(userId, type);
+            tryGrantReward(userId);
         }
-        tryGrantReward(userId);
     }
 
     private boolean updateMissionProgress(
-        Long userId, MissionType type, IntSupplier progressSupplier, BooleanSupplier completionGuard
+        Long userId,
+        MissionType type,
+        IntSupplier progressSupplier,
+        BooleanSupplier completionGuard
     ) {
         return Boolean.TRUE.equals(transactionTemplate.execute(status ->
             missionRepository.findByUserIdAndMissionType(userId, type)
@@ -119,7 +122,8 @@ public class MissionProgressService {
                         return false;
                     }
                     int newProgress = progressSupplier.getAsInt();
-                    boolean canComplete = newProgress >= mission.getTarget() && completionGuard.getAsBoolean();
+                    boolean canComplete = type.isTargetReached(newProgress, mission.getTarget())
+                        && completionGuard.getAsBoolean();
                     int beforeProgress = mission.getProgress();
                     boolean beforeCompleted = mission.isCompleted();
                     mission.advanceProgress(newProgress, canComplete, LocalDateTime.now(clock));
@@ -184,6 +188,9 @@ public class MissionProgressService {
         if (!granted) {
             log.debug("Reward already granted for userId={}, skipping event", userId);
         } else {
+            // TODO: Data loss risk. If DB reward insert succeeds but MQ publish fails,
+            // retries will see granted=false (INSERT IGNORE idempotency) and the event is never re-sent.
+            // Add Outbox pattern or an event_sent + retry mechanism to guarantee eventual delivery.
             safeRun(() -> rewardEventPublisher.publish(new RewardGrantedEvent(userId, 777)),
                 () -> log.info("Reward granted and event dispatched for userId={}", userId),
                 e -> log.warn("Reward granted but event dispatch failed for userId={}: {}", userId, e.getMessage()));

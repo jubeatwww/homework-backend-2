@@ -1,10 +1,13 @@
 package com.example.demo.context.mission.interfaces.rest;
 
+import com.example.demo.context.mission.domain.exception.GameNotFoundException;
+import com.example.demo.context.mission.domain.exception.UserNotFoundException;
 import com.example.demo.context.shared.domain.DomainException;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -15,6 +18,22 @@ import java.util.stream.Collectors;
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(UserNotFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleUserNotFound(UserNotFoundException ex) {
+        return ResponseEntity.status(404).body(Map.of(
+            "code", ex.getCode(),
+            "arguments", ex.getArguments()
+        ));
+    }
+
+    @ExceptionHandler(GameNotFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleGameNotFound(GameNotFoundException ex) {
+        return ResponseEntity.status(404).body(Map.of(
+            "code", ex.getCode(),
+            "arguments", ex.getArguments()
+        ));
+    }
 
     @ExceptionHandler(DomainException.class)
     public ResponseEntity<Map<String, Object>> handleDomainException(DomainException ex) {
@@ -42,7 +61,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleMethodArgumentNotValid(MethodArgumentNotValidException ex) {
         var errors = ex.getBindingResult().getFieldErrors().stream()
             .collect(Collectors.toMap(
-                fe -> fe.getField(),
+                FieldError::getField,
                 fe -> fe.getDefaultMessage() != null ? fe.getDefaultMessage() : "invalid",
                 (a, b) -> a
             ));

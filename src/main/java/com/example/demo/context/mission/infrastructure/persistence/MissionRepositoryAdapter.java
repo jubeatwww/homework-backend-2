@@ -50,9 +50,6 @@ public class MissionRepositoryAdapter implements MissionRepository {
         String sql = "INSERT IGNORE INTO missions (user_id, mission_type, progress, target, completed, completed_at, expired_at, version) VALUES "
             + valuePlaceholders;
 
-        // Version must be 1 (not 0) so that Spring Data JDBC's @Version-based
-        // new-entity detection treats rows loaded later as existing (→ UPDATE).
-        // Primitive int version == 0 is the "new" sentinel → INSERT → duplicate key.
         Object[] params = missions.stream()
             .flatMap(m -> java.util.stream.Stream.of(
                 m.getUserId(),
@@ -62,7 +59,7 @@ public class MissionRepositoryAdapter implements MissionRepository {
                 m.isCompleted(),
                 m.getCompletedAt() != null ? Timestamp.valueOf(m.getCompletedAt()) : null,
                 Timestamp.valueOf(m.getExpiredAt()),
-                1
+                m.getVersion()
             ))
             .toArray();
 

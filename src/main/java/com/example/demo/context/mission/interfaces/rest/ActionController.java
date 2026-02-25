@@ -4,6 +4,7 @@ import com.example.demo.common.cqrs.command.CommandBus;
 import com.example.demo.context.mission.application.command.LaunchGameCommand;
 import com.example.demo.context.mission.application.command.LoginCommand;
 import com.example.demo.context.mission.application.command.PlayGameCommand;
+import com.example.demo.context.mission.domain.exception.IdempotencyKeyRequiredException;
 import com.example.demo.context.mission.interfaces.rest.dto.LaunchGameRequest;
 import com.example.demo.context.mission.interfaces.rest.dto.LoginRequest;
 import com.example.demo.context.mission.interfaces.rest.dto.PlayGameRequest;
@@ -14,8 +15,6 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
-
-import java.util.UUID;
 
 @RestController
 @RequiredArgsConstructor
@@ -61,7 +60,7 @@ public class ActionController {
     private String resolveIdempotencyKey(String headerKey, String bodyKey) {
         if (headerKey != null && !headerKey.isBlank()) return headerKey;
         if (bodyKey != null && !bodyKey.isBlank()) return bodyKey;
-        return UUID.randomUUID().toString();
+        throw new IdempotencyKeyRequiredException();
     }
 
     private long resolveOccurredAt(Long occurredAt) {

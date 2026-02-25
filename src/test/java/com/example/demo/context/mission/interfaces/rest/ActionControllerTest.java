@@ -61,7 +61,7 @@ class ActionControllerTest {
     }
 
     @Test
-    void login_returns400WhenUserNotFound() throws Exception {
+    void login_returns404WhenUserNotFound() throws Exception {
         doThrow(new UserNotFoundException(99L)).when(commandBus).execute(any());
 
         mockMvc.perform(post("/login")
@@ -69,7 +69,7 @@ class ActionControllerTest {
                 .content("""
                     {"userId": 99, "loginDate": "2026-01-10"}
                     """))
-            .andExpect(status().isBadRequest())
+            .andExpect(status().isNotFound())
             .andExpect(jsonPath("$.code").value("USER_NOT_FOUND"));
     }
 
@@ -99,7 +99,7 @@ class ActionControllerTest {
     }
 
     @Test
-    void launchGame_returns400WhenGameNotFound() throws Exception {
+    void launchGame_returns404WhenGameNotFound() throws Exception {
         doThrow(new GameNotFoundException(99L)).when(commandBus).execute(any());
 
         mockMvc.perform(post("/launchGame")
@@ -107,7 +107,7 @@ class ActionControllerTest {
                 .content("""
                     {"userId": 1, "gameId": 99}
                     """))
-            .andExpect(status().isBadRequest())
+            .andExpect(status().isNotFound())
             .andExpect(jsonPath("$.code").value("GAME_NOT_FOUND"));
     }
 
@@ -118,7 +118,7 @@ class ActionControllerTest {
         mockMvc.perform(post("/play")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
-                    {"userId": 1, "gameId": 10, "score": 500}
+                    {"userId": 1, "gameId": 10, "score": 500, "idempotencyKey": "key-500"}
                     """))
             .andExpect(status().isAccepted());
 
@@ -173,13 +173,13 @@ class ActionControllerTest {
     }
 
     @Test
-    void play_generatesIdempotencyKeyWhenNeitherHeaderNorBodyProvided() throws Exception {
-        // Should still succeed — controller generates a UUID internally
+    void play_returns400WhenIdempotencyKeyMissing() throws Exception {
         mockMvc.perform(post("/play")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                     {"userId": 1, "gameId": 10, "score": 100}
                     """))
-            .andExpect(status().isAccepted());
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REQUIRED"));
     }
 }

@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS games_play_record (
                                                  score     INT      NOT NULL DEFAULT 0,
                                                  idempotency_key VARCHAR(100) NOT NULL,
                                                  played_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                                                 UNIQUE KEY uk_play_idempotency_key (idempotency_key),
+                                                 UNIQUE KEY uk_user_play_idempotency_key (user_id, idempotency_key),
                                                  FOREIGN KEY (user_id) REFERENCES users(id),
                                                  FOREIGN KEY (game_id) REFERENCES games(id)
 );
