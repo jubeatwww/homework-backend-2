@@ -5,9 +5,5 @@ import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest
 class DemoApplicationTests {
-
-    // Disable context loading while RocketMQ is not available in the test environment
-    // @Test
-    void contextLoads() {
-    }
+    // Disable context loading test while RocketMQ is not available in the test environment
 }
