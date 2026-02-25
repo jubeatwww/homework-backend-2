@@ -9,6 +9,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -68,6 +69,14 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(Map.of(
             "code", "VALIDATION_FAILED",
             "errors", errors
+        ));
+    }
+
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<Map<String, Object>> handleMissingParam(MissingServletRequestParameterException ex) {
+        return ResponseEntity.badRequest().body(Map.of(
+            "code", "VALIDATION_FAILED",
+            "errors", Map.of(ex.getParameterName(), "parameter is required")
         ));
     }
 
