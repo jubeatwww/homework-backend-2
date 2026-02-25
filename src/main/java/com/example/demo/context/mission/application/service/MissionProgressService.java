@@ -17,7 +17,9 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.IntSupplier;
+import java.util.function.Supplier;
 
 @Slf4j
 @Service
@@ -68,7 +70,12 @@ public class MissionProgressService {
         );
     }
 
-    private void processMission(Long userId, MissionType type, BooleanSupplier recordAction, IntSupplier progressSupplier) {
+    private void processMission(
+        Long userId,
+        MissionType type,
+        BooleanSupplier recordAction,
+        IntSupplier progressSupplier
+    ) {
         processMission(userId, type, recordAction, progressSupplier, () -> true);
     }
 
@@ -79,144 +86,151 @@ public class MissionProgressService {
         IntSupplier progressSupplier,
         BooleanSupplier completionGuard
     ) {
-        boolean alreadyCompleted = false;
-        try {
-            alreadyCompleted = missionCompletionCache.isCompleted(userId, type);
-        } catch (Exception e) {
-            log.debug("Cache check failed for userId={}, type={}: {}", userId, type, e.getMessage());
-        }
-
-        if (alreadyCompleted) {
-            // Mission already done (possibly from a previous MQ delivery whose
-            // tryGrantReward failed). Skip record/progress but still check reward.
+        if (isCachedCompleted(userId, type)) {
             log.debug("Mission already completed (cached) for userId={}, type={}, checking reward", userId, type);
             tryGrantReward(userId);
             return;
         }
 
-        boolean isNewRecord = recordAction.getAsBoolean();
-        if (!isNewRecord) {
+        if (!recordAction.getAsBoolean()) {
             log.debug("Duplicate record for userId={}, type={}, skipping progress update", userId, type);
             tryGrantReward(userId);
             return;
         }
 
-        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            try {
-                Boolean completed = transactionTemplate.execute(status ->
-                    missionRepository.findByUserIdAndMissionType(userId, type)
-                        .map(mission -> {
-                            if (mission.isCompleted()) {
-                                return false;
-                            }
-                            int newProgress = progressSupplier.getAsInt();
-                            boolean canComplete = newProgress >= mission.getTarget() && completionGuard.getAsBoolean();
-                            int beforeProgress = mission.getProgress();
-                            boolean beforeCompleted = mission.isCompleted();
-                            mission.advanceProgress(newProgress, canComplete, LocalDateTime.now(clock));
-                            if (mission.getProgress() == beforeProgress && mission.isCompleted() == beforeCompleted) {
-                                return false;
-                            }
-                            missionRepository.save(mission);
-                            return mission.isCompleted();
-                        })
-                        .orElse(false)
-                );
+        boolean completed = retryOnOptimisticLock(
+            () -> updateMissionProgress(userId, type, progressSupplier, completionGuard),
+            () -> log.warn("Mission update failed after {} retries for userId={}, type={}", MAX_RETRIES, userId, type)
+        );
 
-                if (Boolean.TRUE.equals(completed)) {
-                    safeMarkCompleted(userId, type);
-                }
-                // Always check reward — even if this mission didn't just complete,
-                // another mission may have completed concurrently.
-                tryGrantReward(userId);
-                return;
+        if (completed) {
+            safeMarkCompleted(userId, type);
+        }
+        tryGrantReward(userId);
+    }
+
+    private boolean updateMissionProgress(
+        Long userId, MissionType type, IntSupplier progressSupplier, BooleanSupplier completionGuard
+    ) {
+        return Boolean.TRUE.equals(transactionTemplate.execute(status ->
+            missionRepository.findByUserIdAndMissionType(userId, type)
+                .map(mission -> {
+                    if (mission.isCompleted()) {
+                        return false;
+                    }
+                    int newProgress = progressSupplier.getAsInt();
+                    boolean canComplete = newProgress >= mission.getTarget() && completionGuard.getAsBoolean();
+                    int beforeProgress = mission.getProgress();
+                    boolean beforeCompleted = mission.isCompleted();
+                    mission.advanceProgress(newProgress, canComplete, LocalDateTime.now(clock));
+                    if (mission.getProgress() == beforeProgress && mission.isCompleted() == beforeCompleted) {
+                        return false;
+                    }
+                    missionRepository.save(mission);
+                    return mission.isCompleted();
+                })
+                .orElse(false)
+        ));
+    }
+
+    private <T> T retryOnOptimisticLock(Supplier<T> action, Runnable onExhausted) {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                return action.get();
             } catch (OptimisticLockingFailureException e) {
-                if (attempt == MAX_RETRIES) {
-                    log.warn("Mission update failed after {} retries for userId={}, type={}", MAX_RETRIES, userId, type);
+                if (attempt >= MissionProgressService.MAX_RETRIES) {
+                    onExhausted.run();
                     throw e;
                 }
-                log.debug("Optimistic lock conflict for userId={}, type={}, retrying ({}/{})", userId, type, attempt, MAX_RETRIES);
+                log.debug("Optimistic lock conflict, retrying ({}/{})", attempt, MissionProgressService.MAX_RETRIES);
             }
         }
     }
 
     private void tryGrantReward(Long userId) {
-        try {
-            if (missionCompletionCache.isAllCompleted(userId)) {
-                return;
-            }
-        } catch (Exception e) {
-            log.debug("All-completed cache check failed for userId={}: {}", userId, e.getMessage());
+        if (isCachedAllCompleted(userId)) {
+            return;
         }
 
         String lockKey = "lock:reward:" + userId;
         for (int attempt = 1; attempt <= REWARD_LOCK_MAX_RETRIES; attempt++) {
-            // Lambda returns TRUE when lock acquired & action executed;
-            // fallback null means lock was NOT acquired.
-            Boolean lockAcquired = distributedLock.tryWithLock(lockKey, REWARD_LOCK_TTL_SECONDS, () -> {
-                List<Mission> missions = missionRepository.findByUserId(userId);
-                boolean allCompleted = missions.size() == MissionType.values().length
-                    && missions.stream().allMatch(Mission::isCompleted);
-
-                if (!allCompleted) {
-                    return true;
-                }
-
-                boolean granted = rewardRepository.grantReward(userId, 777);
-                if (!granted) {
-                    log.debug("Reward already granted for userId={}, skipping event", userId);
-                    safeMarkAllCompleted(userId);
-                    return true;
-                }
-
-                try {
-                    rewardEventPublisher.publish(new RewardGrantedEvent(userId, 777));
-                    log.info("Reward granted and event dispatched for userId={}", userId);
-                } catch (Exception e) {
-                    log.warn("Reward granted but event dispatch failed for userId={}: {}", userId, e.getMessage());
-                }
-
-                safeMarkAllCompleted(userId);
-                return true;
-            }, null);
-
-            if (Boolean.TRUE.equals(lockAcquired)) {
+            Boolean acquired = distributedLock.tryWithLock(
+                lockKey, REWARD_LOCK_TTL_SECONDS,
+                () -> { grantRewardIfAllCompleted(userId); return true; },
+                null
+            );
+            if (Boolean.TRUE.equals(acquired)) {
                 return;
             }
 
-            log.debug("Failed to acquire reward lock for userId={}, attempt {}/{}",
-                userId, attempt, REWARD_LOCK_MAX_RETRIES);
-
-            if (attempt < REWARD_LOCK_MAX_RETRIES) {
-                try {
-                    Thread.sleep(REWARD_LOCK_RETRY_DELAY_MS * attempt);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException(
-                        "Interrupted while retrying reward lock for userId=" + userId, ie);
-                }
-            }
+            log.debug("Failed to acquire reward lock for userId={}, attempt {}/{}", userId, attempt, REWARD_LOCK_MAX_RETRIES);
+            sleepBeforeRetry(attempt, userId);
         }
 
-        // All retries exhausted — throw so the MQ consumer fails and redelivers
         throw new RuntimeException(
-            "Failed to acquire reward lock after " + REWARD_LOCK_MAX_RETRIES
-                + " retries for userId=" + userId);
+            "Failed to acquire reward lock after " + REWARD_LOCK_MAX_RETRIES + " retries for userId=" + userId);
     }
 
-    private void safeMarkAllCompleted(Long userId) {
+    private void grantRewardIfAllCompleted(Long userId) {
+        List<Mission> missions = missionRepository.findByUserId(userId);
+        boolean allCompleted = missions.size() == MissionType.values().length
+            && missions.stream().allMatch(Mission::isCompleted);
+
+        if (!allCompleted) {
+            return;
+        }
+
+        boolean granted = rewardRepository.grantReward(userId, 777);
+        if (!granted) {
+            log.debug("Reward already granted for userId={}, skipping event", userId);
+        } else {
+            safeRun(() -> rewardEventPublisher.publish(new RewardGrantedEvent(userId, 777)),
+                () -> log.info("Reward granted and event dispatched for userId={}", userId),
+                e -> log.warn("Reward granted but event dispatch failed for userId={}: {}", userId, e.getMessage()));
+        }
+
+        safeRun(() -> missionCompletionCache.markAllCompleted(userId));
+    }
+
+    // ---- cache helpers ----
+
+    private boolean isCachedCompleted(Long userId, MissionType type) {
         try {
-            missionCompletionCache.markAllCompleted(userId);
+            return missionCompletionCache.isCompleted(userId, type);
         } catch (Exception e) {
-            log.debug("Failed to mark all-completed in cache for userId={}", userId);
+            log.debug("Cache check failed for userId={}, type={}: {}", userId, type, e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean isCachedAllCompleted(Long userId) {
+        try {
+            return missionCompletionCache.isAllCompleted(userId);
+        } catch (Exception e) {
+            log.debug("All-completed cache check failed for userId={}: {}", userId, e.getMessage());
+            return false;
         }
     }
 
     private void safeMarkCompleted(Long userId, MissionType type) {
+        safeRun(() -> missionCompletionCache.markCompleted(userId, type));
+    }
+
+    private void safeRun(Runnable action) {
+        try { action.run(); } catch (Exception e) { log.debug("Safe action failed: {}", e.getMessage()); }
+    }
+
+    private void safeRun(Runnable action, Runnable onSuccess, Consumer<Exception> onFailure) {
+        try { action.run(); onSuccess.run(); } catch (Exception e) { onFailure.accept(e); }
+    }
+
+    private void sleepBeforeRetry(int attempt, Long userId) {
+        if (attempt >= MissionProgressService.REWARD_LOCK_MAX_RETRIES) return;
         try {
-            missionCompletionCache.markCompleted(userId, type);
-        } catch (Exception e) {
-            log.debug("Failed to mark mission completed in cache: userId={}, type={}", userId, type);
+            Thread.sleep(MissionProgressService.REWARD_LOCK_RETRY_DELAY_MS * attempt);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while retrying reward lock for userId=" + userId, ie);
         }
     }
 }
