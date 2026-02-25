@@ -1,9 +1,26 @@
+server:
+  port: 9090
+
 spring:
   application:
-    name: demo
+    name: mission-center
 
-# define mysql properties here
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/taskdb}
+    username: ${SPRING_DATASOURCE_USERNAME:taskuser}
+    password: ${SPRING_DATASOURCE_PASSWORD:taskpass}
 
-# define redis properties here
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
 
-# define rocketmq properties here
+logging:
+  level:
+    root: INFO
+    com.example.demo: DEBUG
+
+rocketmq:
+  name-server: ${ROCKETMQ_NAMESRV:localhost:9876}
+  producer:
+    group: mission-producer-group
