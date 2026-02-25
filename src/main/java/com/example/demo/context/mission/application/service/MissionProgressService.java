@@ -8,9 +8,7 @@ import com.example.demo.context.mission.domain.model.MissionType;
 import com.example.demo.context.mission.domain.repository.MissionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
 import java.time.LocalDate;
@@ -18,15 +16,12 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
-import java.util.function.IntSupplier;
-import java.util.function.Supplier;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class MissionProgressService {
 
-    private static final int MAX_RETRIES = 3;
     private static final int REWARD_LOCK_MAX_RETRIES = 3;
     private static final long REWARD_LOCK_TTL_SECONDS = 10;
     private static final long REWARD_LOCK_RETRY_DELAY_MS = 200;
@@ -39,7 +34,6 @@ public class MissionProgressService {
     private final MissionCompletionCache missionCompletionCache;
     private final RewardEventPublisher rewardEventPublisher;
     private final RewardRepository rewardRepository;
-    private final TransactionTemplate transactionTemplate;
     private final DistributedLock distributedLock;
 
     public void processLogin(Long userId, LocalDate loginDate) {
@@ -47,7 +41,7 @@ public class MissionProgressService {
             userId,
             MissionType.CONSECUTIVE_LOGIN,
             () -> loginRecordPort.recordLogin(userId, loginDate),
-            () -> loginRecordPort.countConsecutiveLoginDays(userId, loginDate)
+            () -> loginRecordPort.countConsecutiveLoginDays(userId, loginDate) >= 3
         );
     }
 
@@ -56,7 +50,7 @@ public class MissionProgressService {
             userId,
             MissionType.DIFFERENT_GAMES,
             () -> gameLaunchRecordPort.recordGameLaunch(userId, gameId),
-            () -> gameLaunchRecordPort.countDistinctGamesLaunched(userId)
+            () -> gameLaunchRecordPort.countDistinctGamesLaunched(userId) >= 3
         );
     }
 
@@ -65,8 +59,8 @@ public class MissionProgressService {
             userId,
             MissionType.PLAY_SCORE,
             () -> gamePlayRecordPort.recordGamePlay(userId, gameId, score, idempotencyKey),
-            () -> gamePlayRecordPort.sumPlayScores(userId),
             () -> gamePlayRecordPort.countPlaySessions(userId) >= 3
+                && gamePlayRecordPort.sumPlayScores(userId) > 1000
         );
     }
 
@@ -74,84 +68,28 @@ public class MissionProgressService {
         Long userId,
         MissionType type,
         BooleanSupplier recordAction,
-        IntSupplier progressSupplier
-    ) {
-        processMission(userId, type, recordAction, progressSupplier, () -> true);
-    }
-
-    private void processMission(
-        Long userId,
-        MissionType type,
-        BooleanSupplier recordAction,
-        IntSupplier progressSupplier,
-        BooleanSupplier completionGuard
+        BooleanSupplier targetReached
     ) {
         if (isCachedCompleted(userId, type)) {
             log.debug("Mission already completed (cached) for userId={}, type={}, checking reward", userId, type);
-            // Cache hit means completed, so we can skip DB update and directly check reward.
             tryGrantReward(userId);
             return;
         }
 
-        boolean actionRecorded = recordAction.getAsBoolean();
-        if (!actionRecorded) {
-            log.debug("Duplicate record for userId={}, type={}, recomputing progress for recovery", userId, type);
-        }
+        recordAction.getAsBoolean();
 
-        boolean completed = retryOnOptimisticLock(
-            () -> updateMissionProgress(userId, type, progressSupplier, completionGuard),
-            () -> log.warn("Mission update failed after {} retries for userId={}, type={}", MAX_RETRIES, userId, type)
-        );
-
-        if (completed) {
-            safeMarkCompleted(userId, type);
+        if (targetReached.getAsBoolean()) {
+            boolean transitioned = missionRepository.completeMission(
+                userId, type, LocalDateTime.now(clock));
+            if (transitioned) {
+                log.info("Mission completed: userId={}, type={}", userId, type);
+                safeMarkCompleted(userId, type);
+            }
             tryGrantReward(userId);
         }
     }
 
-    private boolean updateMissionProgress(
-        Long userId,
-        MissionType type,
-        IntSupplier progressSupplier,
-        BooleanSupplier completionGuard
-    ) {
-        return Boolean.TRUE.equals(transactionTemplate.execute(status ->
-            missionRepository.findByUserIdAndMissionType(userId, type)
-                .map(mission -> {
-                    if (mission.isCompleted()) {
-                        return false;
-                    }
-                    int newProgress = progressSupplier.getAsInt();
-                    boolean canComplete = type.isTargetReached(newProgress, mission.getTarget())
-                        && completionGuard.getAsBoolean();
-                    int beforeProgress = mission.getProgress();
-                    boolean beforeCompleted = mission.isCompleted();
-                    mission.advanceProgress(newProgress, canComplete, LocalDateTime.now(clock));
-                    if (mission.getProgress() == beforeProgress && mission.isCompleted() == beforeCompleted) {
-                        return false;
-                    }
-                    missionRepository.save(mission);
-                    return mission.isCompleted();
-                })
-                .orElse(false)
-        ));
-    }
-
-    private <T> T retryOnOptimisticLock(Supplier<T> action, Runnable onExhausted) {
-        for (int attempt = 1; ; attempt++) {
-            try {
-                return action.get();
-            } catch (OptimisticLockingFailureException e) {
-                if (attempt >= MissionProgressService.MAX_RETRIES) {
-                    onExhausted.run();
-                    throw e;
-                }
-                log.debug("Optimistic lock conflict, retrying ({}/{})", attempt, MissionProgressService.MAX_RETRIES);
-            }
-        }
-    }
-
-    private void tryGrantReward(Long userId) {
+    void tryGrantReward(Long userId) {
         if (isCachedAllCompleted(userId)) {
             return;
         }
@@ -188,9 +126,6 @@ public class MissionProgressService {
         if (!granted) {
             log.debug("Reward already granted for userId={}, skipping event", userId);
         } else {
-            // TODO: Data loss risk. If DB reward insert succeeds but MQ publish fails,
-            // retries will see granted=false (INSERT IGNORE idempotency) and the event is never re-sent.
-            // Add Outbox pattern or an event_sent + retry mechanism to guarantee eventual delivery.
             safeRun(() -> rewardEventPublisher.publish(new RewardGrantedEvent(userId, 777)),
                 () -> log.info("Reward granted and event dispatched for userId={}", userId),
                 e -> log.warn("Reward granted but event dispatch failed for userId={}: {}", userId, e.getMessage()));
@@ -232,9 +167,9 @@ public class MissionProgressService {
     }
 
     private void sleepBeforeRetry(int attempt, Long userId) {
-        if (attempt >= MissionProgressService.REWARD_LOCK_MAX_RETRIES) return;
+        if (attempt >= REWARD_LOCK_MAX_RETRIES) return;
         try {
-            Thread.sleep(MissionProgressService.REWARD_LOCK_RETRY_DELAY_MS * attempt);
+            Thread.sleep(REWARD_LOCK_RETRY_DELAY_MS * attempt);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Interrupted while retrying reward lock for userId=" + userId, ie);

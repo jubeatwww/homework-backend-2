@@ -11,8 +11,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.dao.OptimisticLockingFailureException;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -20,11 +18,11 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
-import java.util.Optional;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.AdditionalAnswers.returnsFirstArg;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -43,7 +41,6 @@ class MissionProgressServiceTest {
     @Mock MissionCompletionCache missionCompletionCache;
     @Mock RewardEventPublisher rewardEventPublisher;
     @Mock RewardRepository rewardRepository;
-    @Mock TransactionTemplate transactionTemplate;
     @Mock DistributedLock distributedLock;
 
     MissionProgressService service;
@@ -53,23 +50,14 @@ class MissionProgressServiceTest {
         Clock clock = Clock.fixed(NOW, ZONE);
         service = new MissionProgressService(
             clock, missionRepository, loginRecordPort, gameLaunchRecordPort, gamePlayRecordPort,
-            missionCompletionCache, rewardEventPublisher, rewardRepository, transactionTemplate, distributedLock
+            missionCompletionCache, rewardEventPublisher, rewardRepository, distributedLock
         );
-
-        // TransactionTemplate: execute the callback directly
-        lenient().when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
-            var callback = invocation.getArgument(0, org.springframework.transaction.support.TransactionCallback.class);
-            return callback.doInTransaction(null);
-        });
 
         // DistributedLock: always acquire lock and run action
         lenient().when(distributedLock.tryWithLock(anyString(), anyLong(), any(), any())).thenAnswer(invocation -> {
             var action = invocation.getArgument(2, java.util.function.Supplier.class);
             return action.get();
         });
-
-        // Default: save returns the mission as-is
-        lenient().when(missionRepository.save(any(Mission.class))).thenAnswer(returnsFirstArg());
     }
 
     // ── processLogin ────────────────────────────────────────────────────────
@@ -78,63 +66,40 @@ class MissionProgressServiceTest {
     class ProcessLogin {
 
         @Test
-        void skipsProgressUpdateWhenCacheMarkedCompleted() {
+        void skipsRecordAndCheckWhenCacheMarkedCompleted() {
             when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(true);
             when(missionCompletionCache.isAllCompleted(USER_ID)).thenReturn(true);
 
             service.processLogin(USER_ID, LOGIN_DATE);
 
             verify(loginRecordPort, never()).recordLogin(any(), any());
+            verify(missionRepository, never()).completeMission(any(), any(), any());
         }
 
         @Test
-        void recomputesProgressWhenDuplicateRecord() {
-            when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(false);
-            when(loginRecordPort.recordLogin(USER_ID, LOGIN_DATE)).thenReturn(false);
-            when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(2);
-
-            Mission mission = Mission.create(USER_ID, MissionType.CONSECUTIVE_LOGIN,
-                LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30));
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.CONSECUTIVE_LOGIN))
-                .thenReturn(Optional.of(mission));
-
-            service.processLogin(USER_ID, LOGIN_DATE);
-
-            verify(transactionTemplate).execute(any());
-            verify(missionRepository).save(any(Mission.class));
-        }
-
-        @Test
-        void advancesProgressWhenNewRecord() {
+        void recordsLoginAndCompletesWhenTargetReached() {
             when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(false);
             when(loginRecordPort.recordLogin(USER_ID, LOGIN_DATE)).thenReturn(true);
-            when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(2);
-
-            Mission mission = Mission.create(USER_ID, MissionType.CONSECUTIVE_LOGIN,
-                LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30));
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.CONSECUTIVE_LOGIN))
-                .thenReturn(Optional.of(mission));
+            when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(3);
+            when(missionRepository.completeMission(eq(USER_ID), eq(MissionType.CONSECUTIVE_LOGIN), any()))
+                .thenReturn(true);
+            when(missionCompletionCache.isAllCompleted(USER_ID)).thenReturn(true);
 
             service.processLogin(USER_ID, LOGIN_DATE);
 
-            verify(missionRepository).save(any(Mission.class));
-        }
-
-        @Test
-        void marksCacheCompletedWhenMissionCompletes() {
-            when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(false);
-            when(loginRecordPort.recordLogin(USER_ID, LOGIN_DATE)).thenReturn(true);
-            when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(3); // target
-
-            Mission mission = Mission.create(USER_ID, MissionType.CONSECUTIVE_LOGIN,
-                LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30));
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.CONSECUTIVE_LOGIN))
-                .thenReturn(Optional.of(mission));
-            when(missionRepository.findByUserId(USER_ID)).thenReturn(List.of(mission));
-
-            service.processLogin(USER_ID, LOGIN_DATE);
-
+            verify(missionRepository).completeMission(eq(USER_ID), eq(MissionType.CONSECUTIVE_LOGIN), any());
             verify(missionCompletionCache).markCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN);
+        }
+
+        @Test
+        void recordsLoginButDoesNotCompleteWhenTargetNotReached() {
+            when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(false);
+            when(loginRecordPort.recordLogin(USER_ID, LOGIN_DATE)).thenReturn(true);
+            when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(2);
+
+            service.processLogin(USER_ID, LOGIN_DATE);
+
+            verify(missionRepository, never()).completeMission(any(), any(), any());
         }
     }
 
@@ -144,19 +109,28 @@ class MissionProgressServiceTest {
     class ProcessGameLaunch {
 
         @Test
-        void advancesProgressWhenNewGameLaunched() {
+        void completesWhenThreeDistinctGames() {
+            when(missionCompletionCache.isCompleted(USER_ID, MissionType.DIFFERENT_GAMES)).thenReturn(false);
+            when(gameLaunchRecordPort.recordGameLaunch(USER_ID, GAME_ID)).thenReturn(true);
+            when(gameLaunchRecordPort.countDistinctGamesLaunched(USER_ID)).thenReturn(3);
+            when(missionRepository.completeMission(eq(USER_ID), eq(MissionType.DIFFERENT_GAMES), any()))
+                .thenReturn(true);
+            when(missionCompletionCache.isAllCompleted(USER_ID)).thenReturn(true);
+
+            service.processGameLaunch(USER_ID, GAME_ID);
+
+            verify(missionRepository).completeMission(eq(USER_ID), eq(MissionType.DIFFERENT_GAMES), any());
+        }
+
+        @Test
+        void doesNotCompleteWhenOnlyTwoGames() {
             when(missionCompletionCache.isCompleted(USER_ID, MissionType.DIFFERENT_GAMES)).thenReturn(false);
             when(gameLaunchRecordPort.recordGameLaunch(USER_ID, GAME_ID)).thenReturn(true);
             when(gameLaunchRecordPort.countDistinctGamesLaunched(USER_ID)).thenReturn(2);
 
-            Mission mission = Mission.create(USER_ID, MissionType.DIFFERENT_GAMES,
-                LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30));
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.DIFFERENT_GAMES))
-                .thenReturn(Optional.of(mission));
-
             service.processGameLaunch(USER_ID, GAME_ID);
 
-            verify(missionRepository).save(any(Mission.class));
+            verify(missionRepository, never()).completeMission(any(), any(), any());
         }
     }
 
@@ -166,127 +140,53 @@ class MissionProgressServiceTest {
     class ProcessGamePlay {
 
         @Test
-        void advancesProgressWhenNewGamePlayed() {
+        void completesWhenBothSessionAndScoreTargetsMet() {
             when(missionCompletionCache.isCompleted(USER_ID, MissionType.PLAY_SCORE)).thenReturn(false);
             when(gamePlayRecordPort.recordGamePlay(USER_ID, GAME_ID, 500, "key-1")).thenReturn(true);
-            when(gamePlayRecordPort.sumPlayScores(USER_ID)).thenReturn(500);
-            // countPlaySessions not called because 500 < 1000 target (short-circuit &&)
-
-            Mission mission = Mission.create(USER_ID, MissionType.PLAY_SCORE,
-                LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30));
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.PLAY_SCORE))
-                .thenReturn(Optional.of(mission));
+            when(gamePlayRecordPort.countPlaySessions(USER_ID)).thenReturn(3);
+            when(gamePlayRecordPort.sumPlayScores(USER_ID)).thenReturn(1200);
+            when(missionRepository.completeMission(eq(USER_ID), eq(MissionType.PLAY_SCORE), any()))
+                .thenReturn(true);
+            when(missionCompletionCache.isAllCompleted(USER_ID)).thenReturn(true);
 
             service.processGamePlay(USER_ID, GAME_ID, 500, "key-1");
 
-            verify(missionRepository).save(any(Mission.class));
+            verify(missionRepository).completeMission(eq(USER_ID), eq(MissionType.PLAY_SCORE), any());
         }
 
         @Test
         void doesNotCompleteWhenSessionCountBelowThree() {
             when(missionCompletionCache.isCompleted(USER_ID, MissionType.PLAY_SCORE)).thenReturn(false);
             when(gamePlayRecordPort.recordGamePlay(USER_ID, GAME_ID, 1200, "key-1")).thenReturn(true);
-            when(gamePlayRecordPort.sumPlayScores(USER_ID)).thenReturn(1200); // above 1000 target
-            when(gamePlayRecordPort.countPlaySessions(USER_ID)).thenReturn(2); // below 3 sessions guard
-
-            Mission mission = Mission.create(USER_ID, MissionType.PLAY_SCORE,
-                LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30));
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.PLAY_SCORE))
-                .thenReturn(Optional.of(mission));
+            when(gamePlayRecordPort.countPlaySessions(USER_ID)).thenReturn(2);
 
             service.processGamePlay(USER_ID, GAME_ID, 1200, "key-1");
 
-            // Progress updated but not completed (canComplete = false due to guard)
-            verify(missionRepository).save(any(Mission.class));
-            verify(missionCompletionCache, never()).markCompleted(USER_ID, MissionType.PLAY_SCORE);
+            verify(missionRepository, never()).completeMission(any(), any(), any());
         }
 
         @Test
         void doesNotCompleteWhenScoreIsExactlyOneThousand() {
             when(missionCompletionCache.isCompleted(USER_ID, MissionType.PLAY_SCORE)).thenReturn(false);
             when(gamePlayRecordPort.recordGamePlay(USER_ID, GAME_ID, 1000, "key-1000")).thenReturn(true);
+            when(gamePlayRecordPort.countPlaySessions(USER_ID)).thenReturn(3);
             when(gamePlayRecordPort.sumPlayScores(USER_ID)).thenReturn(1000);
-
-            Mission mission = Mission.create(USER_ID, MissionType.PLAY_SCORE,
-                LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30));
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.PLAY_SCORE))
-                .thenReturn(Optional.of(mission));
 
             service.processGamePlay(USER_ID, GAME_ID, 1000, "key-1000");
 
-            verify(missionRepository).save(any(Mission.class));
-            verify(gamePlayRecordPort, never()).countPlaySessions(USER_ID);
-            verify(missionCompletionCache, never()).markCompleted(USER_ID, MissionType.PLAY_SCORE);
-        }
-    }
-
-    // ── optimistic locking retry ────────────────────────────────────────────
-
-    @Nested
-    class OptimisticLockingRetry {
-
-        @Test
-        void retriesOnOptimisticLockFailure() {
-            when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(false);
-            when(loginRecordPort.recordLogin(USER_ID, LOGIN_DATE)).thenReturn(true);
-            when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(2);
-
-            // Return a FRESH mission each call so retry sees unmodified state
-            LocalDateTime expiredAt = LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30);
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.CONSECUTIVE_LOGIN))
-                .thenAnswer(inv -> Optional.of(Mission.create(USER_ID, MissionType.CONSECUTIVE_LOGIN, expiredAt)));
-            when(missionRepository.save(any(Mission.class)))
-                .thenThrow(new OptimisticLockingFailureException("conflict"))
-                .thenAnswer(returnsFirstArg());
-
-            service.processLogin(USER_ID, LOGIN_DATE);
-
-            // save called twice: first fails, second succeeds
-            verify(missionRepository, times(2)).save(any(Mission.class));
+            verify(missionRepository, never()).completeMission(any(), any(), any());
         }
 
         @Test
-        void throwsAfterMaxRetries() {
-            when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(false);
-            when(loginRecordPort.recordLogin(USER_ID, LOGIN_DATE)).thenReturn(true);
-            when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(2);
+        void doesNotCompleteWhenScoreBelowThreshold() {
+            when(missionCompletionCache.isCompleted(USER_ID, MissionType.PLAY_SCORE)).thenReturn(false);
+            when(gamePlayRecordPort.recordGamePlay(USER_ID, GAME_ID, 200, "key-1")).thenReturn(true);
+            when(gamePlayRecordPort.countPlaySessions(USER_ID)).thenReturn(3);
+            when(gamePlayRecordPort.sumPlayScores(USER_ID)).thenReturn(600);
 
-            // Return a FRESH mission each call so retry sees unmodified state
-            LocalDateTime expiredAt = LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30);
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.CONSECUTIVE_LOGIN))
-                .thenAnswer(inv -> Optional.of(Mission.create(USER_ID, MissionType.CONSECUTIVE_LOGIN, expiredAt)));
-            when(missionRepository.save(any(Mission.class)))
-                .thenThrow(new OptimisticLockingFailureException("conflict"));
+            service.processGamePlay(USER_ID, GAME_ID, 200, "key-1");
 
-            assertThatThrownBy(() -> service.processLogin(USER_ID, LOGIN_DATE))
-                .isInstanceOf(OptimisticLockingFailureException.class);
-
-            verify(missionRepository, times(3)).save(any(Mission.class));
-        }
-
-        @Test
-        void duplicateRetryStillRecomputesProgressAfterOptimisticLockFailure() {
-            when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(false);
-            when(loginRecordPort.recordLogin(USER_ID, LOGIN_DATE)).thenReturn(true, false);
-            when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(2);
-
-            LocalDateTime expiredAt = LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30);
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.CONSECUTIVE_LOGIN))
-                .thenAnswer(inv -> Optional.of(Mission.create(USER_ID, MissionType.CONSECUTIVE_LOGIN, expiredAt)));
-            when(missionRepository.save(any(Mission.class)))
-                .thenThrow(new OptimisticLockingFailureException("conflict-1"))
-                .thenThrow(new OptimisticLockingFailureException("conflict-2"))
-                .thenThrow(new OptimisticLockingFailureException("conflict-3"))
-                .thenAnswer(returnsFirstArg());
-
-            assertThatThrownBy(() -> service.processLogin(USER_ID, LOGIN_DATE))
-                .isInstanceOf(OptimisticLockingFailureException.class);
-
-            service.processLogin(USER_ID, LOGIN_DATE);
-
-            // first call exhausts 3 retries, second duplicate call still recomputes and succeeds
-            verify(missionRepository, times(4)).save(any(Mission.class));
-            verify(transactionTemplate, times(4)).execute(any());
+            verify(missionRepository, never()).completeMission(any(), any(), any());
         }
     }
 
@@ -300,17 +200,15 @@ class MissionProgressServiceTest {
             when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(false);
             when(loginRecordPort.recordLogin(USER_ID, LOGIN_DATE)).thenReturn(true);
             when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(3);
-
-            Mission completedMission = createCompletedMission(MissionType.CONSECUTIVE_LOGIN);
-            Mission completedMission2 = createCompletedMission(MissionType.DIFFERENT_GAMES);
-            Mission completedMission3 = createCompletedMission(MissionType.PLAY_SCORE);
-
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.CONSECUTIVE_LOGIN))
-                .thenReturn(Optional.of(Mission.create(USER_ID, MissionType.CONSECUTIVE_LOGIN,
-                    LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30))));
+            when(missionRepository.completeMission(eq(USER_ID), eq(MissionType.CONSECUTIVE_LOGIN), any()))
+                .thenReturn(true);
             when(missionCompletionCache.isAllCompleted(USER_ID)).thenReturn(false);
             when(missionRepository.findByUserId(USER_ID))
-                .thenReturn(List.of(completedMission, completedMission2, completedMission3));
+                .thenReturn(List.of(
+                    createCompletedMission(MissionType.CONSECUTIVE_LOGIN),
+                    createCompletedMission(MissionType.DIFFERENT_GAMES),
+                    createCompletedMission(MissionType.PLAY_SCORE)
+                ));
             when(rewardRepository.grantReward(USER_ID, 777)).thenReturn(true);
 
             service.processLogin(USER_ID, LOGIN_DATE);
@@ -323,17 +221,15 @@ class MissionProgressServiceTest {
             when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(false);
             when(loginRecordPort.recordLogin(USER_ID, LOGIN_DATE)).thenReturn(true);
             when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(3);
-
-            Mission completedMission = createCompletedMission(MissionType.CONSECUTIVE_LOGIN);
-            Mission completedMission2 = createCompletedMission(MissionType.DIFFERENT_GAMES);
-            Mission completedMission3 = createCompletedMission(MissionType.PLAY_SCORE);
-
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.CONSECUTIVE_LOGIN))
-                .thenReturn(Optional.of(Mission.create(USER_ID, MissionType.CONSECUTIVE_LOGIN,
-                    LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30))));
+            when(missionRepository.completeMission(eq(USER_ID), eq(MissionType.CONSECUTIVE_LOGIN), any()))
+                .thenReturn(true);
             when(missionCompletionCache.isAllCompleted(USER_ID)).thenReturn(false);
             when(missionRepository.findByUserId(USER_ID))
-                .thenReturn(List.of(completedMission, completedMission2, completedMission3));
+                .thenReturn(List.of(
+                    createCompletedMission(MissionType.CONSECUTIVE_LOGIN),
+                    createCompletedMission(MissionType.DIFFERENT_GAMES),
+                    createCompletedMission(MissionType.PLAY_SCORE)
+                ));
             when(rewardRepository.grantReward(USER_ID, 777)).thenReturn(false);
 
             service.processLogin(USER_ID, LOGIN_DATE);
@@ -347,11 +243,8 @@ class MissionProgressServiceTest {
             when(missionCompletionCache.isCompleted(USER_ID, MissionType.CONSECUTIVE_LOGIN)).thenReturn(false);
             when(loginRecordPort.recordLogin(USER_ID, LOGIN_DATE)).thenReturn(true);
             when(loginRecordPort.countConsecutiveLoginDays(USER_ID, LOGIN_DATE)).thenReturn(3);
-
-            Mission mission = Mission.create(USER_ID, MissionType.CONSECUTIVE_LOGIN,
-                LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30));
-            when(missionRepository.findByUserIdAndMissionType(USER_ID, MissionType.CONSECUTIVE_LOGIN))
-                .thenReturn(Optional.of(mission));
+            when(missionRepository.completeMission(eq(USER_ID), eq(MissionType.CONSECUTIVE_LOGIN), any()))
+                .thenReturn(true);
             when(missionCompletionCache.isAllCompleted(USER_ID)).thenReturn(true);
 
             service.processLogin(USER_ID, LOGIN_DATE);
@@ -364,8 +257,7 @@ class MissionProgressServiceTest {
         LocalDateTime expiredAt = LocalDateTime.now(Clock.fixed(NOW, ZONE)).plusDays(30);
         return Mission.reconstitute(
             (long) type.ordinal() + 1, USER_ID, type,
-            type.getTarget(), type.getTarget(), true,
-            LocalDateTime.now(Clock.fixed(NOW, ZONE)), expiredAt, 1
+            true, LocalDateTime.now(Clock.fixed(NOW, ZONE)), expiredAt
         );
     }
 }

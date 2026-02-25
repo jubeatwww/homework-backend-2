@@ -10,20 +10,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 class MissionEntityTest {
 
     @Test
-    void isNew_returnsTrueWhenIdIsNullEvenIfVersionIsZero() {
+    void isNew_returnsTrueWhenIdIsNull() {
         MissionEntity entity = new MissionEntity(
             null, 1L, MissionType.CONSECUTIVE_LOGIN,
-            0, 3, false, null, LocalDateTime.now().plusDays(30), 0
+            false, null, LocalDateTime.now().plusDays(30)
         );
 
         assertThat(entity.isNew()).isTrue();
     }
 
     @Test
-    void isNew_returnsFalseWhenIdExistsEvenIfVersionIsZero() {
+    void isNew_returnsFalseWhenIdExists() {
         MissionEntity entity = new MissionEntity(
             10L, 1L, MissionType.CONSECUTIVE_LOGIN,
-            1, 3, false, null, LocalDateTime.now().plusDays(30), 0
+            false, null, LocalDateTime.now().plusDays(30)
         );
 
         assertThat(entity.isNew()).isFalse();

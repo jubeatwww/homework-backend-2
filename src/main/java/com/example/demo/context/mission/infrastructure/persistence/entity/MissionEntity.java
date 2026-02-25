@@ -3,7 +3,6 @@ package com.example.demo.context.mission.infrastructure.persistence.entity;
 import com.example.demo.context.mission.domain.model.Mission;
 import com.example.demo.context.mission.domain.model.MissionType;
 import org.springframework.data.annotation.Id;
-import org.springframework.data.annotation.Version;
 import org.springframework.data.domain.Persistable;
 import org.springframework.data.relational.core.mapping.Table;
 
@@ -14,12 +13,9 @@ public record MissionEntity(
     @Id Long id,
     Long userId,
     MissionType missionType,
-    int progress,
-    int target,
     boolean completed,
     LocalDateTime completedAt,
-    LocalDateTime expiredAt,
-    @Version int version
+    LocalDateTime expiredAt
 ) implements Persistable<Long> {
 
     @Override
@@ -33,14 +29,13 @@ public record MissionEntity(
     }
 
     public Mission toDomain() {
-        return Mission.reconstitute(id, userId, missionType, progress, target, completed, completedAt, expiredAt, version);
+        return Mission.reconstitute(id, userId, missionType, completed, completedAt, expiredAt);
     }
 
     public static MissionEntity fromDomain(Mission m) {
         return new MissionEntity(
             m.getId(), m.getUserId(), m.getMissionType(),
-            m.getProgress(), m.getTarget(), m.isCompleted(),
-            m.getCompletedAt(), m.getExpiredAt(), m.getVersion()
+            m.isCompleted(), m.getCompletedAt(), m.getExpiredAt()
         );
     }
 }

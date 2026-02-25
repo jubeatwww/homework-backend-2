@@ -21,12 +21,9 @@ class MissionTest {
         assertThat(mission.getId()).isNull();
         assertThat(mission.getUserId()).isEqualTo(1L);
         assertThat(mission.getMissionType()).isEqualTo(MissionType.CONSECUTIVE_LOGIN);
-        assertThat(mission.getProgress()).isZero();
-        assertThat(mission.getTarget()).isEqualTo(MissionType.CONSECUTIVE_LOGIN.getTarget());
         assertThat(mission.isCompleted()).isFalse();
         assertThat(mission.getCompletedAt()).isNull();
         assertThat(mission.getExpiredAt()).isEqualTo(FUTURE);
-        assertThat(mission.getVersion()).isZero();
     }
 
     // ── reconstitute ────────────────────────────────────────────────────────
@@ -35,18 +32,15 @@ class MissionTest {
     void reconstitute_setsAllFieldsCorrectly() {
         Mission mission = Mission.reconstitute(
             10L, 1L, MissionType.DIFFERENT_GAMES,
-            2, 3, false, null, FUTURE, 1
+            false, null, FUTURE
         );
 
         assertThat(mission.getId()).isEqualTo(10L);
         assertThat(mission.getUserId()).isEqualTo(1L);
         assertThat(mission.getMissionType()).isEqualTo(MissionType.DIFFERENT_GAMES);
-        assertThat(mission.getProgress()).isEqualTo(2);
-        assertThat(mission.getTarget()).isEqualTo(3);
         assertThat(mission.isCompleted()).isFalse();
         assertThat(mission.getCompletedAt()).isNull();
         assertThat(mission.getExpiredAt()).isEqualTo(FUTURE);
-        assertThat(mission.getVersion()).isEqualTo(1);
     }
 
     // ── isExpired ───────────────────────────────────────────────────────────
@@ -67,83 +61,42 @@ class MissionTest {
 
     @Test
     void isExpired_returnsFalseWhenExpiryIsNull() {
-        Mission mission = Mission.reconstitute(1L, 1L, MissionType.CONSECUTIVE_LOGIN, 0, 3, false, null, null, 0);
+        Mission mission = Mission.reconstitute(1L, 1L, MissionType.CONSECUTIVE_LOGIN, false, null, null);
 
         assertThat(mission.isExpired(NOW)).isFalse();
     }
 
-    // ── advanceProgress ─────────────────────────────────────────────────────
+    // ── complete ─────────────────────────────────────────────────────────────
 
     @Test
-    void advanceProgress_updatesProgressWhenHigher() {
+    void complete_transitionsToCompletedAndSetsTimestamp() {
         Mission mission = Mission.create(1L, MissionType.CONSECUTIVE_LOGIN, FUTURE);
 
-        mission.advanceProgress(2, NOW);
+        boolean result = mission.complete(NOW);
 
-        assertThat(mission.getProgress()).isEqualTo(2);
-        assertThat(mission.isCompleted()).isFalse();
-    }
-
-    @Test
-    void advanceProgress_completesWhenProgressReachesTarget() {
-        Mission mission = Mission.create(1L, MissionType.CONSECUTIVE_LOGIN, FUTURE);
-
-        mission.advanceProgress(3, NOW); // target is 3
-
-        assertThat(mission.getProgress()).isEqualTo(3);
+        assertThat(result).isTrue();
         assertThat(mission.isCompleted()).isTrue();
         assertThat(mission.getCompletedAt()).isEqualTo(NOW);
     }
 
     @Test
-    void advanceProgress_doesNotDecreaseProgress() {
+    void complete_returnsFalseWhenAlreadyCompleted() {
         Mission mission = Mission.create(1L, MissionType.CONSECUTIVE_LOGIN, FUTURE);
-        mission.advanceProgress(2, NOW);
+        mission.complete(NOW);
 
-        mission.advanceProgress(1, NOW);
+        boolean result = mission.complete(NOW.plusHours(1));
 
-        assertThat(mission.getProgress()).isEqualTo(2);
+        assertThat(result).isFalse();
+        assertThat(mission.getCompletedAt()).isEqualTo(NOW); // original timestamp preserved
     }
 
     @Test
-    void advanceProgress_doesNothingWhenAlreadyCompleted() {
-        Mission mission = Mission.create(1L, MissionType.CONSECUTIVE_LOGIN, FUTURE);
-        mission.advanceProgress(3, NOW);
-
-        LocalDateTime later = NOW.plusHours(1);
-        mission.advanceProgress(3, later);
-
-        assertThat(mission.getCompletedAt()).isEqualTo(NOW);
-    }
-
-    @Test
-    void advanceProgress_doesNothingWhenExpired() {
+    void complete_returnsFalseWhenExpired() {
         Mission mission = Mission.create(1L, MissionType.CONSECUTIVE_LOGIN, PAST);
 
-        mission.advanceProgress(3, NOW);
+        boolean result = mission.complete(NOW);
 
-        assertThat(mission.getProgress()).isZero();
+        assertThat(result).isFalse();
         assertThat(mission.isCompleted()).isFalse();
-    }
-
-    @Test
-    void advanceProgress_withCanCompleteFalse_doesNotCompleteEvenAtTarget() {
-        Mission mission = Mission.create(1L, MissionType.CONSECUTIVE_LOGIN, FUTURE);
-
-        mission.advanceProgress(3, false, NOW);
-
-        assertThat(mission.getProgress()).isEqualTo(3);
-        assertThat(mission.isCompleted()).isFalse();
-        assertThat(mission.getCompletedAt()).isNull();
-    }
-
-    @Test
-    void advanceProgress_withCanCompleteFalse_canStillBeCompletedLater() {
-        Mission mission = Mission.create(1L, MissionType.CONSECUTIVE_LOGIN, FUTURE);
-        mission.advanceProgress(3, false, NOW);
-
-        mission.advanceProgress(3, true, NOW.plusMinutes(1));
-
-        assertThat(mission.isCompleted()).isTrue();
     }
 }

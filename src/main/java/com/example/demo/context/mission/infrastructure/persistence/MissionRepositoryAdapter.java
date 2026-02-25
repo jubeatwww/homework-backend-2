@@ -10,6 +10,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -34,9 +35,12 @@ public class MissionRepositoryAdapter implements MissionRepository {
     }
 
     @Override
-    public Mission save(Mission mission) {
-        MissionEntity saved = missionEntityRepository.save(MissionEntity.fromDomain(mission));
-        return saved.toDomain();
+    public boolean completeMission(Long userId, MissionType missionType, LocalDateTime completedAt) {
+        int updated = jdbcTemplate.update(
+            "UPDATE missions SET completed = true, completed_at = ? WHERE user_id = ? AND mission_type = ? AND completed = false",
+            Timestamp.valueOf(completedAt), userId, missionType.name()
+        );
+        return updated > 0;
     }
 
     @Override
@@ -45,21 +49,18 @@ public class MissionRepositoryAdapter implements MissionRepository {
             return;
         }
         String valuePlaceholders = String.join(", ", missions.stream()
-            .map(m -> "(?, ?, ?, ?, ?, ?, ?, ?)")
+            .map(m -> "(?, ?, ?, ?, ?)")
             .toList());
-        String sql = "INSERT IGNORE INTO missions (user_id, mission_type, progress, target, completed, completed_at, expired_at, version) VALUES "
+        String sql = "INSERT IGNORE INTO missions (user_id, mission_type, completed, completed_at, expired_at) VALUES "
             + valuePlaceholders;
 
         Object[] params = missions.stream()
             .flatMap(m -> java.util.stream.Stream.of(
                 m.getUserId(),
                 m.getMissionType().name(),
-                m.getProgress(),
-                m.getTarget(),
                 m.isCompleted(),
                 m.getCompletedAt() != null ? Timestamp.valueOf(m.getCompletedAt()) : null,
-                Timestamp.valueOf(m.getExpiredAt()),
-                m.getVersion()
+                Timestamp.valueOf(m.getExpiredAt())
             ))
             .toArray();
 

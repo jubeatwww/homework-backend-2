@@ -11,44 +11,32 @@ public class Mission extends BaseAggregateRoot<Mission, Long> {
     private Long id;
     private Long userId;
     private MissionType missionType;
-    private int progress;
-    private int target;
     private boolean completed;
     private LocalDateTime completedAt;
     private LocalDateTime expiredAt;
-    private int version;
 
     public static Mission create(Long userId, MissionType missionType, LocalDateTime expiredAt) {
         var mission = new Mission();
         mission.userId = userId;
         mission.missionType = missionType;
-        mission.progress = 0;
-        mission.target = missionType.getTarget();
         mission.completed = false;
         mission.expiredAt = expiredAt;
-        mission.version = 0;
         return mission;
     }
 
     public static Mission reconstitute(
         Long id, Long userId,
         MissionType missionType,
-        int progress,
-        int target,
         boolean completed,
         LocalDateTime completedAt,
-        LocalDateTime expiredAt,
-        int version) {
+        LocalDateTime expiredAt) {
         var mission = new Mission();
         mission.id = id;
         mission.userId = userId;
         mission.missionType = missionType;
-        mission.progress = progress;
-        mission.target = target;
         mission.completed = completed;
         mission.completedAt = completedAt;
         mission.expiredAt = expiredAt;
-        mission.version = version;
         return mission;
     }
 
@@ -56,20 +44,18 @@ public class Mission extends BaseAggregateRoot<Mission, Long> {
         return expiredAt != null && now.isAfter(expiredAt);
     }
 
-    public void advanceProgress(int newProgress, LocalDateTime now) {
-        advanceProgress(newProgress, true, now);
-    }
-
-    public void advanceProgress(int newProgress, boolean canComplete, LocalDateTime now) {
+    /**
+     * Completes this mission if not already completed and not expired.
+     * This is a one-way latch: once completed, it cannot be undone.
+     *
+     * @return true if this call actually transitioned the mission to completed
+     */
+    public boolean complete(LocalDateTime now) {
         if (this.completed || isExpired(now)) {
-            return;
+            return false;
         }
-        if (newProgress > this.progress) {
-            this.progress = newProgress;
-        }
-        if (canComplete && this.progress >= this.target) {
-            this.completed = true;
-            this.completedAt = now;
-        }
+        this.completed = true;
+        this.completedAt = now;
+        return true;
     }
 }

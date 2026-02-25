@@ -48,12 +48,9 @@ CREATE TABLE IF NOT EXISTS missions (
                                         id           BIGINT      AUTO_INCREMENT PRIMARY KEY,
                                         user_id      BIGINT      NOT NULL,
                                         mission_type VARCHAR(30) NOT NULL,
-                                        progress     INT         NOT NULL DEFAULT 0,
-                                        target       INT         NOT NULL,
                                         completed    BOOLEAN     NOT NULL DEFAULT FALSE,
                                         completed_at DATETIME    NULL,
                                         expired_at   DATETIME    NOT NULL,
-                                        version      INT         NOT NULL DEFAULT 0,
                                         UNIQUE KEY uk_user_mission (user_id, mission_type),
                                         FOREIGN KEY (user_id) REFERENCES users(id)
 );
