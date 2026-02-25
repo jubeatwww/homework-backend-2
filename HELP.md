@@ -237,8 +237,30 @@ context.mission
 
 ## Running Tests
 
+### Unit Tests
+
 ```bash
 ./mvnw test
 ```
 
 Tests use Mockito for unit testing and `@WebMvcTest` for controller-layer tests. No external infrastructure required.
+
+### Smoke Test (End-to-End)
+
+A `test.sh` script is provided for manual end-to-end smoke testing against a running system.
+
+**Prerequisites:** All services must be running (`docker-compose up -d`).
+
+```bash
+bash test.sh
+```
+
+The script covers:
+1. Error handling — non-existent user (404), non-existent game (404), missing idempotency key (400)
+2. Eligible user — login / launch / play all return 202, missions created
+3. Expired user — events dispatched but consumer skips processing
+4. Redis cache hit — repeated expired user skips DB lookup
+5. Full reward flow — user 3 completes all 3 missions → 777-point reward granted
+6. Idempotency — replaying the same play request doesn't double-count
+
+> **Note:** The script includes a configurable `SLEEP_FOR_MQ` delay (default 2s) to allow async MQ consumers to process events before verification.

@@ -15,7 +15,6 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.function.BooleanSupplier;
-import java.util.function.Consumer;
 
 @Slf4j
 @Service
@@ -76,6 +75,9 @@ public class MissionProgressService {
             return;
         }
 
+        // Intentionally ignoring the return value: INSERT IGNORE returns false on duplicate,
+        // but we still proceed to check completion. This ensures MQ redelivery or concurrent
+        // events don't silently skip the reward-granting path.
         recordAction.getAsBoolean();
 
         if (targetReached.getAsBoolean()) {
@@ -125,13 +127,18 @@ public class MissionProgressService {
         boolean granted = rewardRepository.grantReward(userId, 777);
         if (!granted) {
             log.debug("Reward already granted for userId={}, skipping event", userId);
-        } else {
-            safeRun(() -> rewardEventPublisher.publish(new RewardGrantedEvent(userId, 777)),
-                () -> log.info("Reward granted and event dispatched for userId={}", userId),
-                e -> log.warn("Reward granted but event dispatch failed for userId={}: {}", userId, e.getMessage()));
+            safeRun(() -> missionCompletionCache.markAllCompleted(userId));
+            return;
         }
 
-        safeRun(() -> missionCompletionCache.markAllCompleted(userId));
+        try {
+            rewardEventPublisher.publish(new RewardGrantedEvent(userId, 777));
+            log.info("Reward granted and event dispatched for userId={}", userId);
+            safeRun(() -> missionCompletionCache.markAllCompleted(userId));
+        } catch (Exception e) {
+            log.warn("Reward granted but event dispatch failed for userId={}, will retry on next consume: {}",
+                userId, e.getMessage());
+        }
     }
 
     // ---- cache helpers ----
@@ -160,10 +167,6 @@ public class MissionProgressService {
 
     private void safeRun(Runnable action) {
         try { action.run(); } catch (Exception e) { log.debug("Safe action failed: {}", e.getMessage()); }
-    }
-
-    private void safeRun(Runnable action, Runnable onSuccess, Consumer<Exception> onFailure) {
-        try { action.run(); onSuccess.run(); } catch (Exception e) { onFailure.accept(e); }
     }
 
     private void sleepBeforeRetry(int attempt, Long userId) {

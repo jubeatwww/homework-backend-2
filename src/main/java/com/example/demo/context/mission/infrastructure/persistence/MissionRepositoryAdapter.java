@@ -37,8 +37,8 @@ public class MissionRepositoryAdapter implements MissionRepository {
     @Override
     public boolean completeMission(Long userId, MissionType missionType, LocalDateTime completedAt) {
         int updated = jdbcTemplate.update(
-            "UPDATE missions SET completed = true, completed_at = ? WHERE user_id = ? AND mission_type = ? AND completed = false",
-            Timestamp.valueOf(completedAt), userId, missionType.name()
+            "UPDATE missions SET completed = true, completed_at = ? WHERE user_id = ? AND mission_type = ? AND completed = false AND expired_at > ?",
+            Timestamp.valueOf(completedAt), userId, missionType.name(), Timestamp.valueOf(completedAt)
         );
         return updated > 0;
     }
