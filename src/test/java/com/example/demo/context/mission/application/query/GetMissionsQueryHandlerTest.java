@@ -3,6 +3,8 @@ package com.example.demo.context.mission.application.query;
 import com.example.demo.context.mission.application.port.GameLaunchRecordPort;
 import com.example.demo.context.mission.application.port.GamePlayRecordPort;
 import com.example.demo.context.mission.application.port.LoginRecordPort;
+import com.example.demo.context.mission.application.port.UserQueryPort;
+import com.example.demo.context.mission.domain.exception.UserNotFoundException;
 import com.example.demo.context.mission.domain.model.Mission;
 import com.example.demo.context.mission.domain.model.MissionType;
 import com.example.demo.context.mission.domain.repository.MissionRepository;
@@ -20,6 +22,7 @@ import java.time.ZoneId;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -30,6 +33,7 @@ class GetMissionsQueryHandlerTest {
     private static final Long USER_ID = 1L;
     private static final LocalDateTime EXPIRED_AT = LocalDateTime.of(2026, 2, 1, 0, 0);
 
+    @Mock UserQueryPort userQueryPort;
     @Mock MissionRepository missionRepository;
     @Mock LoginRecordPort loginRecordPort;
     @Mock GameLaunchRecordPort gameLaunchRecordPort;
@@ -40,12 +44,25 @@ class GetMissionsQueryHandlerTest {
     @BeforeEach
     void setUp() {
         Clock clock = Clock.fixed(NOW, ZONE);
-        handler = new GetMissionsQueryHandler(clock, missionRepository,
-            loginRecordPort, gameLaunchRecordPort, gamePlayRecordPort);
+        List<CriteriaComputer> computers = List.of(
+            new ConsecutiveLoginCriteriaComputer(clock, loginRecordPort),
+            new DifferentGamesCriteriaComputer(gameLaunchRecordPort),
+            new PlayScoreCriteriaComputer(gamePlayRecordPort)
+        );
+        handler = new GetMissionsQueryHandler(userQueryPort, missionRepository, computers);
+    }
+
+    @Test
+    void handle_throwsWhenUserNotFound() {
+        when(userQueryPort.userExists(999L)).thenReturn(false);
+
+        assertThatThrownBy(() -> handler.handle(new GetMissionsQuery(999L)))
+            .isInstanceOf(UserNotFoundException.class);
     }
 
     @Test
     void handle_returnsMissionResponsesWithComputedCriteria() {
+        when(userQueryPort.userExists(USER_ID)).thenReturn(true);
         var missions = List.of(
             Mission.reconstitute(1L, USER_ID, MissionType.CONSECUTIVE_LOGIN, false, null, EXPIRED_AT),
             Mission.reconstitute(2L, USER_ID, MissionType.DIFFERENT_GAMES, true,
@@ -86,6 +103,7 @@ class GetMissionsQueryHandlerTest {
 
     @Test
     void handle_returnsEmptyListWhenNoMissionsExist() {
+        when(userQueryPort.userExists(USER_ID)).thenReturn(true);
         when(missionRepository.findByUserId(USER_ID)).thenReturn(List.of());
 
         List<MissionResponse> result = handler.handle(new GetMissionsQuery(USER_ID));

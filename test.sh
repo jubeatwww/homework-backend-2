@@ -4,7 +4,7 @@
 #
 # DB seed (init.sql) provides:
 #   user 1 (player1) — created_at = now  (eligible)
-#   user 2 (player2) — need manual UPDATE to expire (see below)
+#   user 2 (player2) — created_at = 45 days ago (expired)
 #   user 3 (player3) — created_at = now  (used for full reward flow)
 #   user 999          — does not exist
 #   games 1-5
@@ -43,14 +43,6 @@ check_body() {
     echo -e "  ${RED}FAIL${NC} $desc — expected HTTP $expected_http, got $actual_http"
   fi
 }
-
-# -------------------------------------------------------
-section "Setup: mark user 2 as registered 31 days ago"
-# -------------------------------------------------------
-echo "  Run this SQL if not already done:"
-echo "    UPDATE users SET created_at = NOW() - INTERVAL 31 DAY WHERE id = 2;"
-echo "  Press Enter to continue..."
-read -r
 
 # -------------------------------------------------------
 section "1. Non-existent user → 404 (UserNotFound)"

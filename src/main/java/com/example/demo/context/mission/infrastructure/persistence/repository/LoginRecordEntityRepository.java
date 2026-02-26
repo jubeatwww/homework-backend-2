@@ -15,6 +15,6 @@ public interface LoginRecordEntityRepository extends Repository<LoginRecordEntit
     @Query("INSERT IGNORE INTO login_records (user_id, login_date) VALUES (:userId, :loginDate)")
     boolean insertIgnore(@Param("userId") Long userId, @Param("loginDate") LocalDate loginDate);
 
-    @Query("SELECT login_date FROM login_records WHERE user_id = :userId AND login_date <= :asOfDate ORDER BY login_date DESC LIMIT 30")
+    @Query("SELECT login_date FROM login_records WHERE user_id = :userId AND login_date <= :asOfDate ORDER BY login_date DESC LIMIT 3")
     List<LocalDate> findRecentLoginDates(@Param("userId") Long userId, @Param("asOfDate") LocalDate asOfDate);
 }
